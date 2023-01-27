@@ -1,14 +1,23 @@
+# This file is intended to parse customer support chats for product information to be used in traing a GPT-3 Model to answer questions about the product supported in the chats
+# It uses OpenAI's text-davinci-003 to pull structured data about the product from the unstructured chats
+# It uses support chats from Intercom's API, but any support chat platform could be used
+
 # Import necessary libraries
 import requests
-import json
-from openai import api_key
+# import json
 import openai
+import os
+from datetime import datetime
+import time
+import checkedConvos
+
+conversation_ids_checked = checkedConvos.ids
 
 # Set the OpenAI API key
-openai.api_key = "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"
+openai.api_key = os.environ['OPENAI_KEY']
 
 # Set the Intercom access token
-access_token = "dG9rOjdmZjBmNzM0X2EzN2ZfNGYxOV84Y2EyXzAyNDYzYTdjODg3MzoxOjA="
+access_token = os.environ['INTERCOM_KEY']
 
 # Set the URL for the Intercom API endpoint
 api_url = "https://api.intercom.io/conversations"
@@ -29,117 +38,133 @@ params = {
 def get_conversations():
   # Initialize empty lists to store the prompts and responses
   prompts = []
-  responses = []
-  starting_date = '1641013200' # setting earliest date to analyze
-  cm_slice = 500 # setting character limit on customer prompts
-  am_slice = 500 # setting character limit on agent prompts
-  
-  conversation_ids_checked = ['45932300018484', '45932300018524', '45932300018541', '45932300018581', '4944027790', '4943974544', '4944023659', '4990802698', '5005713249', '5012594031', '4717888219', '5022450335', '5074329044', '5109849327', '45932300018583', '45932300018582', '5134776020', '5161200285', '5152286720', '5190964015', '45932300018584', '5213268222', '5189597143', '5212253269', '5244206235', '5260683268', '5225457648', '5260683423', '5257585446', '5269615527', '5324514597', '5274045995', '5281471780', '5270008660', '5390855153', '5398927606', '5409685008', '5409631032', '5432915636', '5433532509', '5433547138', '5444140571']
-  
-  # Set the initial page number to 1
-  page_number = 1
 
-  # Set the initial last conversation ID to 0
-  last_conversation_id = 0
+  # settings
+  starting_date = 1641013200  # setting earliest date to analyze
+  prompt_limit = 4000  # setting character limit on customer prompts
+  pages_to_analyze = 500  # setting limit on pages of chats to analyze
+  last_page_analyzed = 58  # setting the last page of chats analyzed
+  new_conversation_ids_checked = []
+  cm_prompt = "Starchup sells a software product. Determine whether you can summary the following support chat with Starchup users into a help page article or FAQ. If yes, return the the article in the following format: TITLE: Title of the article, BODY: Body of the article in html format. If no, simply answer 'no'. Customer Chat: "
+
+  # Set the initial page number to the last page analyzed
+  page_number = last_page_analyzed or 1
+  starting_after = "WzE2NTQ5NTYyMjcwMDAsNDU5MzIzMDAwMTUxOTMsNTld"
+  tokens_used = 0
 
   # Continue retrieving and processing pages of conversations
   # until there are no more conversations to retrieve
-  while page_number < 3:
+  while page_number < pages_to_analyze:
     # Set the request parameters for the current page
-    params["page"] = page_number
-    print("params", params)
+    if len(starting_after) > 1:
+      params["starting_after"] = starting_after
+      params["per_page"] = 100
+      print("starting_after: ", starting_after)
     # Send the GET request to the Intercom API
     response = requests.get(api_url, headers=headers, params=params)
     # Check the response status code
     if response.status_code == 200:
       # Load the response data as a JSON object
       data = response.json()
-      print("ALL CONVOS:", data)
-
+      starting_after = data["pages"]["next"]["starting_after"]
+      if data["pages"]["next"]["page"] < page_number:
+        continue
+      page_number = data["pages"]["next"]["page"]
       # Loop through the conversations in the response
       for conversation in data["conversations"]:
-        # Extract the conversation ID, retrieve the full conversation, extract conversation parts
         conversation_id = conversation["id"]
-        print("conversation_id:", conversation_id)
-        print("created_at", conversation["created_at"])
+        # Check if conversation already analyzed
         if conversation_id in conversation_ids_checked:
-          print("CONVERSATION SKIPPED")
           continue
-
+        if conversation_id in new_conversation_ids_checked:
+          continue
+        # Check if conversation is older than set "Starting Data"
+        if conversation["created_at"] < starting_date:
+          continue
+        # Get full conversation from Intercom API
         full_conversation_url = api_url + "/" + conversation_id
-        full_conversation_params = {
-          "display_as": "plaintext"
-        }
-        fc_response = requests.get(full_conversation_url, headers=headers, params=full_conversation_params)
+        full_conversation_params = {"display_as": "plaintext"}
+        fc_response = requests.get(full_conversation_url,
+                                   headers=headers,
+                                   params=full_conversation_params)
         full_conversation = fc_response.json()
-        
+        # Extract conversation parts
         parts = full_conversation["conversation_parts"]["conversation_parts"]
-
         # Initialize empty strings to store the conversation messages
-        customer_message = ""
-        agent_message = ""
+        formatted_conversation = ""
+        if full_conversation["source"]["delivered_as"] == "customer_initiated":
+          if "Image" not in full_conversation["source"][
+              "body"] if full_conversation["source"]["body"] else "":
+            formatted_conversation += "CUSTOMER: " + full_conversation[
+              "source"]["body"] + "\n "
 
         # Loop through the parts in the conversation
         for part in parts:
           # Check if the part is a message
-          if part["part_type"] == "comment":
-            # Check if the part is an image
+          if part["part_type"] == "comment" or part["part_type"] == "note":
+            # Ignore images
             if "Image" not in part["body"] if part["body"] else "":
-              print("Message Part " + part["author"]["type"] + " body:", part["body"])
-              # Check if the part was sent by a customer
-              if part["author"]["type"] == "user":
+              if "assets.bratinreegateway.com" not in part["body"] if part[
+                  "body"] else "":
                 # Concatenate the message text to the customer message string
-                customer_message += part["body"] + " "
-              # Check if the part was sent by an agent
-              elif part["author"]["type"] == "admin":
-                # Concatenate the message text to the agent message string
-                agent_message += part["body"] + " "
-
-        # Use ChatGPT to summarize the customer and agent messages
-        cm_prompt = "Summarize this customer's support chat into a question: " + customer_message[:cm_slice]
-        print("Concatented customer_message: ", customer_message[:cm_slice])
-        print("Concatented agent_message: ", agent_message)
-        GPT_prompt = openai.Completion.create(engine="text-davinci-003",
-                                          prompt=cm_prompt,
-                                          max_tokens=64,
-                                          temperature=0.5,
-                                          top_p=1,
-                                          frequency_penalty=0,
-                                          presence_penalty=0)
-        print("OpenAI Prompt: ", GPT_prompt)
-        new_output = {"prompt": GPT_prompt.choices[0].text}
-
-        am_prompt = "Determine whether Agent answered the customer's question with product-related information. If yes, return that answer summarized. If no, return a summary of what the agent said. Customer:" + GPT_prompt.choices[0].text + ". Agent: " + agent_message[:am_slice]
-        GPT_response = openai.Completion.create(engine="text-davinci-003",
-                                            prompt=am_prompt,
-                                            max_tokens=64,
-                                            temperature=0.5,
-                                            top_p=1,
-                                            frequency_penalty=0,
-                                            presence_penalty=0)
-
-        print("OpenAI Response: ", GPT_response)
-        new_output["response"] = GPT_response.choices[0].text
-        prompts.append(new_output)
-
-        # Update the last conversation ID
-        last_conversation_id = conversation_id
-        print("last_conversation_id: ", last_conversation_id)
-        conversation_ids_checked.append(conversation_id)
-        print("conversation_ids_checked:", conversation_ids_checked)
+                formatted_conversation += part["author"]["type"] + ": " + part[
+                  "body"] + "\n "
+        # Send prompt to GPT-3 for analysis
+        new_prompt = cm_prompt + formatted_conversation[:prompt_limit]
+        time.sleep(5)
+        potential_article = openai.Completion.create(engine="text-davinci-002",
+                                                     prompt=new_prompt,
+                                                     max_tokens=200,
+                                                     temperature=0.5,
+                                                     top_p=1,
+                                                     frequency_penalty=0,
+                                                     presence_penalty=0)
+        #  Create JSON record with output
+        new_output = potential_article.choices[0].text
+        tokens_used += potential_article.usage.total_tokens
+        prompt_is_article = new_output.find('TITLE') or new_output.find(
+          'Title')
+        if prompt_is_article > -1:
+          # Create Article on Intercom
+          output_array = new_output.split('BODY:')
+          if not len(output_array) > 1:
+            continue
+          title_string = output_array[0].replace("\n", "")
+          title_string = title_string.replace("TITLE: ", "")
+          title_string = title_string.replace("Title: ", "")
+          body_string = output_array[1] + "\n<p>ID: " + conversation_id + "</p>"
+          article_data = {
+            "title": title_string,
+            "body": body_string,
+            "author_id": 465942,
+            "state": "draft"
+          }
+          post_response = requests.post("https://api.intercom.io/articles",
+                                        data=article_data,
+                                        headers=headers)
+        new_conversation_ids_checked.append(conversation_id)
+        print("NEW conversation_ids_checked:", new_conversation_ids_checked)
+        total_conversation_ids_checked = len(
+          new_conversation_ids_checked) + len(conversation_ids_checked)
+        print("TOTAL conversation_ids_checked: ",
+              total_conversation_ids_checked)
+        print("page_number: ", page_number)
+        print("starting_after: ", starting_after)
+        print("TOKENS USED: ", tokens_used)
 
       # Increment the page number
       page_number += 1
-      print("page_number: ", page_number)
+      print("new page_number: ", page_number)
     # If the response status code is not 200, there are no more conversations to retrieve
-    else: 
+    else:
       break
-  print('prompts 1',prompts)
-  # Return the prompts and responses as a tuple
+  # Return the prompts
   return prompts
 
 
-# print("NLP prompts: ", prompts, "NLP responses: ", responses)
 # Call the get_conversations function
 prompts = get_conversations()
-print('prompts 2',prompts)
+
+# TODO: Refactor the OpenAI calls into a separate file to be imported into files for pulling chats from other chat platform APIs
+# TODO: Add support for parsing chat structuring features such as "tags" so support agents can indicate quality training chats in real-time
+# TODO: Add endpoints for receiving new chats from webhooks on the chat platforms
